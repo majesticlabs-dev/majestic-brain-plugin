@@ -3,8 +3,7 @@
 Local-first SQLite/FTS5 note store with deterministic entity extraction for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Inspired by [garrytan/gbrain](https://github.com/garrytan/gbrain) and
-[OpenHuman](https://openhuman.ai)-style memory primitives, adapted to
+Inspired by [OpenHuman](https://openhuman.ai)-style memory primitives, adapted to
 the Hermes `MemoryProvider` interface with **no network calls, no model calls,
 and no external dependencies**.
 
@@ -46,31 +45,37 @@ None — stdlib only. SQLite ships with Python; FTS5 is included in most builds.
 Clone directly into the Hermes plugins directory:
 
 ```bash
-git clone https://github.com/<org>/hermes-majestic-brain-plugin.git ~/.hermes/plugins/gbrain
+git clone https://github.com/<org>/hermes-majestic-brain-plugin.git ~/.hermes/plugins/majestic-brain
 ```
 
-The directory can stay `gbrain` for existing Hermes discovery/config compatibility;
-the provider and exposed tool are branded Majestic Brain.
+The directory name `majestic-brain` matches the provider name for config
+discovery.
 
 ## Setup
 
 ```bash
-hermes memory setup    # select the plugin directory name; existing installs usually remain "gbrain"
+hermes memory setup    # select "majestic-brain" from the provider list
 ```
 
-Or manually for the compatibility install shown above:
+Or manually:
 
 ```bash
-hermes config set memory.provider gbrain
+hermes config set memory.provider majestic-brain
 ```
 
-If you install the plugin under `~/.hermes/plugins/majestic-brain`, set
-`memory.provider` to `majestic-brain` instead.
+## Package Structure
+
+The canonical implementation lives in the `majestic_brain` package:
+
+- `majestic_brain/` — primary implementation (provider, store, extractor)
+
+```python
+from majestic_brain import MajesticBrainProvider   # canonical import
+```
 
 ## Tools
 
-**majestic_brain_note** — primary tool with four actions (legacy name
-`gbrain_note` also accepted for backward compatibility):
+**majestic_brain_note** — primary tool with four actions:
 
 - **`add`** — Store a note. Returns `{note_id, entities, aliases, content_hash, note_kind, source_type, duplicate}`.
 - **`search`** — FTS5 search. Returns `{results, count}`.
@@ -85,12 +90,16 @@ If you install the plugin under `~/.hermes/plugins/majestic-brain`, set
 - `source_ref` (optional): Source reference string.
 - `metadata` (optional): Arbitrary JSON-serializable metadata.
 
-## Legacy Compatibility
+## Migration
 
-- Provider `name` property returns `"majestic-brain"` (was `"gbrain"`).
-- `legacy_name` property returns `"gbrain"`.
-- Tool `gbrain_note` continues to work alongside `majestic_brain_note`.
-- Plugin directory remains `gbrain/` for discovery compatibility.
+If upgrading from a legacy installation, run:
+
+```bash
+python scripts/migrate_legacy_db.py
+```
+
+This copies the existing database and markdown mirror to the new location
+(`<hermes_home>/majestic-brain/`) so the old directory can be safely deleted.
 
 ## Development
 

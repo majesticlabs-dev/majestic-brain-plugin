@@ -1,10 +1,10 @@
-"""SQLite/FTS5-backed note store for Majestic Brain (formerly GBrain).
+"""SQLite/FTS5-backed note store for Majestic Brain.
 
 Stores notes with extracted entities and supports full-text search with
 an automatic FTS5 fallback to LIKE when FTS5 is unavailable.
 
 Thread-safe via an RLock. Profile-scoped: each store lives at
-``<hermes_home>/gbrain/gbrain.db``.
+``<hermes_home>/majestic-brain/majestic_brain.db``.
 
 OpenHuman-style memory primitives: content_hash deduplication,
 provenance fields (note_kind, source_type, source_ref, metadata_json),
@@ -68,14 +68,12 @@ def _safe_yaml_value(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        # Escape any double-quote chars, wrap in double quotes
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     if isinstance(value, (list, tuple)):
         inner = ", ".join(_safe_yaml_value(v) for v in value)
         return f"[{inner}]"
     if isinstance(value, dict):
-        # JSON is valid YAML for simple dicts
         return json.dumps(value, ensure_ascii=False)
     return str(value)
 
@@ -152,7 +150,7 @@ _CREATE_INDEX_HASH = (
 )
 
 
-class GBrainStore:
+class MajesticBrainStore:
     """SQLite-backed note store with FTS5, entity linking, and memory primitives.
 
     Attributes:
@@ -195,7 +193,6 @@ class GBrainStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
-            # Apply migrations for existing databases
             self._apply_migrations()
             try:
                 self._conn.executescript(_FTS_SCHEMA)
@@ -208,13 +205,10 @@ class GBrainStore:
 
     def _apply_migrations(self) -> None:
         """Add new columns to existing databases (idempotent)."""
-        # Get current column names
         cursor = self._conn.execute("PRAGMA table_info(notes)")
         existing_cols = {row[1] for row in cursor.fetchall()}
 
         for migration_sql in _MIGRATIONS:
-            # Extract column name from ALTER TABLE ... ADD COLUMN <name> ...
-            # Pattern: ALTER TABLE notes ADD COLUMN colname ...
             parts = migration_sql.split()
             if len(parts) >= 6 and parts[0] == "ALTER" and parts[3] == "ADD" and parts[4] == "COLUMN":
                 col_name = parts[5]
@@ -223,7 +217,7 @@ class GBrainStore:
                         self._conn.execute(migration_sql)
                         existing_cols.add(col_name)
                     except sqlite3.OperationalError:
-                        pass  # Column already exists or other safe skip
+                        pass
 
         # Backfill hashes for rows that predate content-addressed storage.
         try:
@@ -238,7 +232,6 @@ class GBrainStore:
         except sqlite3.OperationalError:
             pass
 
-        # Ensure index exists
         try:
             self._conn.execute(_CREATE_INDEX_HASH)
             self._conn.commit()
@@ -262,15 +255,11 @@ class GBrainStore:
 
         Deduplicates by content_hash — if the exact content already exists,
         returns the existing note_id with ``duplicate=True``.
-
-        Returns dict with note_id, entities, aliases, content_hash,
-        note_kind, source_type, duplicate.
         """
         content = content.strip()
         if not content:
             raise ValueError("content must not be empty")
 
-        # Validate provenance fields
         if note_kind not in VALID_NOTE_KINDS:
             raise ValueError(
                 f"Invalid note_kind '{note_kind}'. Must be one of: {sorted(VALID_NOTE_KINDS)}"
@@ -286,7 +275,6 @@ class GBrainStore:
         aliases = entities.get("aliases", [])
 
         with self._lock:
-            # Deduplication check
             existing = self._conn.execute(
                 """
                 SELECT note_id, note_kind, source_type, source_ref, metadata_json
@@ -333,18 +321,15 @@ class GBrainStore:
             )
             note_id: int = cur.lastrowid  # type: ignore[assignment]
 
-            # Resolve and link entities
             for name in entity_names:
                 entity_id = self._resolve_entity(name)
                 self._link_note_entity(note_id, entity_id)
 
-            # Store aliases on entity rows
             for pair in aliases:
                 self._add_alias(pair[0], pair[1])
 
             self._conn.commit()
 
-        # Write markdown mirror (outside the lock for performance)
         self._write_markdown_mirror(note_id, content, content_hash, note_kind,
                                      source_type, source_ref, entities, now)
 
@@ -387,7 +372,6 @@ class GBrainStore:
             lines.append(f"source_ref: {_safe_yaml_value(source_ref)}")
             lines.append(f"created_at: {_safe_yaml_value(created_at)}")
 
-            # Entities as a simplified representation
             entity_names = all_entity_names(entities)
             if entity_names:
                 lines.append(f"entities: {_safe_yaml_value(entity_names)}")
@@ -422,9 +406,6 @@ class GBrainStore:
                 try:
                     return self._search_fts(query, limit)
                 except sqlite3.OperationalError:
-                    # Raw user queries can contain FTS syntax characters
-                    # (paths, URLs, apostrophes). Fall back instead of making
-                    # recall brittle exactly when the user needs it.
                     return self._search_like(query, limit)
             return self._search_like(query, limit)
 
@@ -532,7 +513,6 @@ class GBrainStore:
                 "SELECT COUNT(*) FROM entities WHERE aliases != '' AND aliases IS NOT NULL"
             ).fetchone()[0]
 
-            # Note kind breakdown
             note_kinds = {}
             try:
                 rows = self._conn.execute(
@@ -540,7 +520,7 @@ class GBrainStore:
                 ).fetchall()
                 note_kinds = {row["note_kind"]: row["cnt"] for row in rows}
             except sqlite3.OperationalError:
-                pass  # Pre-migration DB
+                pass
 
         return {
             "total_notes": total_notes,
@@ -570,13 +550,11 @@ class GBrainStore:
 
     def _find_entity(self, name: str) -> Optional[int]:
         """Find entity by name or alias. Returns entity_id or None."""
-        # Direct name match
         row = self._conn.execute(
             "SELECT entity_id FROM entities WHERE name = ?", (name,)
         ).fetchone()
         if row is not None:
             return int(row["entity_id"])
-        # Alias match (comma-separated aliases column)
         alias_pattern = f"%,{_escape_like(name)},%"
         row = self._conn.execute(
             "SELECT entity_id FROM entities"
@@ -617,7 +595,6 @@ class GBrainStore:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         d = dict(row)
-        # Parse entities JSON if present
         if "entities" in d and isinstance(d["entities"], str):
             try:
                 d["entities"] = json.loads(d["entities"])

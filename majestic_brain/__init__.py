@@ -5,13 +5,9 @@ search, deterministic regex extraction of URLs/file paths/@handles/#tags/quoted
 phrases/capitalized entities/AKA aliases, and entity-based note linking.
 
 No network calls, no model calls, no external dependencies. Disabled unless
-activated via ``memory.provider: gbrain`` in config.yaml.
+activated via ``memory.provider: majestic-brain`` in config.yaml.
 
-Storage: ``<hermes_home>/gbrain/gbrain.db``
-
-Legacy compatibility: accepts both ``majestic_brain_note`` (primary) and
-``gbrain_note`` (legacy) tool names. Provider name reports ``gbrain`` for
-existing config compatibility; ``majestic-brain`` is accepted via matching aliases.
+Storage: ``<hermes_home>/majestic-brain/majestic_brain.db``.
 """
 
 from __future__ import annotations
@@ -21,12 +17,24 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.memory_provider import MemoryProvider
-from tools.registry import tool_error
-
-from .store import GBrainStore
+from .store import MajesticBrainStore
 
 logger = logging.getLogger(__name__)
+
+
+# Lazy / optional imports for standalone operation (CI, tests without Hermes)
+try:
+    from agent.memory_provider import MemoryProvider
+except ImportError:
+    MemoryProvider = object  # type: ignore[assignment]
+
+try:
+    from tools.registry import tool_error
+except ImportError:
+
+    def tool_error(msg: str) -> str:
+        return json.dumps({"error": msg})
+
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -94,52 +102,34 @@ MAJESTIC_BRAIN_NOTE_SCHEMA = {
     },
 }
 
-# Legacy schema kept for backward compatibility
-GBRAIN_NOTE_SCHEMA = {
-    "name": "gbrain_note",
-    "description": (
-        "[Legacy] Use majestic_brain_note instead. "
-        "GBrain local note memory. Stores notes with auto-extracted entities."
-    ),
-    "parameters": MAJESTIC_BRAIN_NOTE_SCHEMA["parameters"],
-}
-
 # Tools we accept in handle_tool_call
-_ACCEPTED_TOOL_NAMES = {"majestic_brain_note", "gbrain_note"}
+_ACCEPTED_TOOL_NAMES = {"majestic_brain_note"}
 
 
 # ---------------------------------------------------------------------------
 # Provider implementation
 # ---------------------------------------------------------------------------
 
-class GBrainProvider(MemoryProvider):
+
+class MajesticBrainProvider(MemoryProvider):
     """Majestic Brain memory provider — SQLite/FTS5 with deterministic extraction.
 
-    Primary name is 'gbrain' for config/discovery compatibility.
+    Primary name is 'majestic-brain' for config/discovery compatibility.
     Display name is 'Majestic Brain' for user-facing messages.
-    Legacy 'gbrain' and new 'majestic-brain' are both accepted for matching.
     """
 
     # All provider names that Hermes discovery may use to match this provider.
-    _ALL_NAMES = frozenset({"gbrain", "majestic-brain"})
+    _ALL_NAMES = frozenset({"majestic-brain", "majestic_brain"})
 
     def __init__(self) -> None:
-        self._store: Optional[GBrainStore] = None
+        self._store: Optional[MajesticBrainStore] = None
         self._session_id: str = ""
         self._hermes_home: str = ""
 
     @property
     def name(self) -> str:
-        """Return 'gbrain' — the name that matches config `memory.provider: gbrain`.
-
-        This is the config-matching name, not the display name.
-        """
-        return "gbrain"
-
-    @property
-    def legacy_name(self) -> str:
-        """Legacy provider name for backward compatibility."""
-        return "gbrain"
+        """Return 'majestic-brain' — the primary provider name for config matching."""
+        return "majestic-brain"
 
     @property
     def display_name(self) -> str:
@@ -154,7 +144,8 @@ class GBrainProvider(MemoryProvider):
     def matches_name(self, candidate: str) -> bool:
         """Check whether this provider matches the given name.
 
-        Accepts both 'gbrain' (legacy/config) and 'majestic-brain' (new).
+        Accepts 'majestic-brain' (primary/config) and
+        'majestic_brain' (Python/import-friendly).
         """
         return candidate in self._ALL_NAMES
 
@@ -167,14 +158,16 @@ class GBrainProvider(MemoryProvider):
         self._hermes_home = kwargs.get("hermes_home", "")
         if not self._hermes_home:
             from hermes_constants import get_hermes_home
+
             self._hermes_home = str(get_hermes_home())
 
-        db_dir = Path(self._hermes_home) / "gbrain"
+        db_dir = Path(self._hermes_home) / "majestic-brain"
         db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = db_dir / "gbrain.db"
-        self._store = GBrainStore(db_path)
-        logger.info("Majestic Brain initialized: db=%s, fts5=%s",
-                     db_path, self._store._has_fts5)
+        db_path = db_dir / "majestic_brain.db"
+        self._store = MajesticBrainStore(db_path)
+        logger.info(
+            "Majestic Brain initialized: db=%s, fts5=%s", db_path, self._store._has_fts5
+        )
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -193,14 +186,12 @@ class GBrainProvider(MemoryProvider):
                 "notes with auto-extracted entities (URLs, paths, handles, tags, aliases). "
                 "Supports note_kind (fact|episodic|semantic|artifact) and source tracking.\n"
                 "Use majestic_brain_note(action='search') to recall notes.\n"
-                "Use majestic_brain_note(action='links') to find related notes.\n"
-                "[Legacy tool name 'gbrain_note' also accepted.]"
+                "Use majestic_brain_note(action='links') to find related notes."
             )
         return (
             f"# Majestic Brain Memory\n"
             f"Active. {notes} notes, {entities} entities. "
-            f"Use majestic_brain_note to add, search, or find linked notes.\n"
-            f"[Legacy tool name 'gbrain_note' also accepted.]"
+            f"Use majestic_brain_note to add, search, or find linked notes."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -219,12 +210,14 @@ class GBrainProvider(MemoryProvider):
             logger.debug("Majestic Brain prefetch failed: %s", e)
             return ""
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(
+        self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> None:
         """Majestic Brain doesn't auto-sync turns — only explicit tool calls and on_memory_write."""
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [MAJESTIC_BRAIN_NOTE_SCHEMA, GBRAIN_NOTE_SCHEMA]
+        return [MAJESTIC_BRAIN_NOTE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name not in _ACCEPTED_TOOL_NAMES:
@@ -327,7 +320,8 @@ class GBrainProvider(MemoryProvider):
 # Plugin entry point
 # ---------------------------------------------------------------------------
 
+
 def register(ctx) -> None:
     """Register the Majestic Brain memory provider with the plugin system."""
-    provider = GBrainProvider()
+    provider = MajesticBrainProvider()
     ctx.register_memory_provider(provider)

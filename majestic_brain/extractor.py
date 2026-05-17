@@ -1,4 +1,4 @@
-r"""Deterministic entity extractor for Majestic Brain (formerly GBrain).
+r"""Deterministic entity extractor for Majestic Brain.
 
 Extracts structured entities from free-text notes using pure regex.
 No model calls, no network — fully deterministic.
@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple
 
 _RE_URL = re.compile(r'https?://\S+')
 _RE_FILE_PATH = re.compile(
-    r'(?<![\w.-])(?:~/|\.\.?/|/)?(?:[\w.-]+/){1,8}[\w.-]+\.[A-Za-z0-9]{1,10}\b'
+    r'(?<![\w.-])(?:~/|\.\.?|/)?(?:[\w.-]+/){1,8}[\w.-]+\.[A-Za-z0-9]{1,10}\b'
 )
 _RE_HANDLE = re.compile(r'@(\w+)')
 _RE_TAG = re.compile(r'#(\w+)')
