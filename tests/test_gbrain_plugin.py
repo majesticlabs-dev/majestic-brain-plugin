@@ -80,12 +80,12 @@ class TestExtractor:
 
     def test_extract_aka_aliases(self):
         from gbrain.extractor import extract
-        result = extract("Alice aka Ally also known as Coder")
+        result = extract("David aka Dave also known as Coder")
         aliases = result["aliases"]
-        # Two AKA patterns: Alice→Ally, Ally→Coder
+        # Two AKA patterns: David→Dave, Dave→Coder
         assert len(aliases) >= 1
         flat = [n.lower() for pair in aliases for n in pair]
-        assert "alice" in flat or "ally" in flat
+        assert "david" in flat or "dave" in flat
 
     def test_extract_aka_simple(self):
         from gbrain.extractor import extract
@@ -167,6 +167,38 @@ class TestGBrainStore:
         results = store.search("Python")
         assert len(results) >= 1
         assert any("Python" in r["content"] for r in results)
+        store.close()
+
+    def test_migrates_legacy_notes_and_backfills_hashes(self, tmp_path):
+        from gbrain.store import GBrainStore
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE notes ("
+            "note_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "content TEXT NOT NULL, "
+            "entities TEXT DEFAULT '{}', "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO notes (content, entities) VALUES (?, ?)",
+            ("Legacy Project Alpha note", "{}"),
+        )
+        conn.commit()
+        conn.close()
+
+        store = GBrainStore(db_path)
+        cols = {row[1] for row in store._conn.execute("PRAGMA table_info(notes)").fetchall()}
+        assert {"content_hash", "note_kind", "source_type", "source_ref", "metadata_json", "updated_at"} <= cols
+        row = store._conn.execute("SELECT content_hash, note_kind, source_type FROM notes WHERE note_id = 1").fetchone()
+        assert row["content_hash"]
+        assert row["note_kind"] == "fact"
+        assert row["source_type"] == "manual"
+        assert store.search("Legacy Project Alpha")
+        duplicate = store.add_note("Legacy Project Alpha note")
+        assert duplicate["duplicate"] is True
+        assert duplicate["note_id"] == 1
         store.close()
 
     def test_search_empty_query(self, tmp_path):
@@ -279,6 +311,60 @@ class TestGBrainStore:
         assert store.get_linked_by_entity("_") == []
         store.close()
 
+    def test_content_hash_deduplicates_exact_content(self, tmp_path):
+        store = self._make_store(tmp_path)
+        first = store.add_note("Same durable fact")
+        second = store.add_note("Same durable fact")
+        assert first["duplicate"] is False
+        assert second["duplicate"] is True
+        assert second["note_id"] == first["note_id"]
+        assert second["content_hash"] == first["content_hash"]
+        assert store.stats()["total_notes"] == 1
+        store.close()
+
+    def test_provenance_fields_are_searchable_results(self, tmp_path):
+        store = self._make_store(tmp_path)
+        result = store.add_note(
+            "Weekly cron report mentions #revenue",
+            note_kind="artifact",
+            source_type="cron_report",
+            source_ref="cron:weekly-summary",
+            metadata={"job_id": "weekly-summary"},
+        )
+        assert result["note_kind"] == "artifact"
+        assert result["source_type"] == "cron_report"
+        found = store.search("Weekly cron report")
+        assert found[0]["content_hash"] == result["content_hash"]
+        assert found[0]["note_kind"] == "artifact"
+        assert found[0]["source_type"] == "cron_report"
+        assert found[0]["source_ref"] == "cron:weekly-summary"
+        store.close()
+
+    def test_markdown_mirror_written_with_frontmatter(self, tmp_path):
+        store = self._make_store(tmp_path)
+        result = store.add_note(
+            "Captured context about Project Alpha",
+            note_kind="semantic",
+            source_type="import",
+            source_ref="file:/tmp/source.md",
+        )
+        md_path = store.markdown_dir / f"note_{result['note_id']:06d}.md"
+        assert md_path.exists()
+        text = md_path.read_text(encoding="utf-8")
+        assert "content_hash:" in text
+        assert "note_kind: semantic" in text
+        assert "source_type: import" in text
+        assert "Captured context about Project Alpha" in text
+        store.close()
+
+    def test_invalid_note_kind_and_source_type_are_rejected(self, tmp_path):
+        store = self._make_store(tmp_path)
+        with pytest.raises(ValueError, match="Invalid note_kind"):
+            store.add_note("Bad kind", note_kind="junk")
+        with pytest.raises(ValueError, match="Invalid source_type"):
+            store.add_note("Bad source", source_type="slack_firehose")
+        store.close()
+
 
 # ===========================================================================
 # Provider lifecycle and tool dispatch tests
@@ -319,6 +405,10 @@ class TestGBrainProvider:
         from gbrain import GBrainProvider
         p = GBrainProvider()
         assert p.name == "gbrain"
+        assert p.legacy_name == "gbrain"
+        assert p.display_name == "Majestic Brain"
+        assert p.matches_name("gbrain")
+        assert p.matches_name("majestic-brain")
 
     def test_is_available(self):
         from gbrain import GBrainProvider
@@ -334,7 +424,7 @@ class TestGBrainProvider:
     def test_system_prompt_block(self, tmp_path):
         p = self._make_provider(tmp_path)
         block = p.system_prompt_block()
-        assert "GBrain Memory" in block
+        assert "Majestic Brain Memory" in block
         assert "Empty" in block  # no notes yet
         p.shutdown()
 
@@ -355,7 +445,7 @@ class TestGBrainProvider:
         p = self._make_provider(tmp_path)
         p.handle_tool_call("gbrain_note", {"action": "add", "content": "Python is great"})
         result = p.prefetch("Python")
-        assert "GBrain Memory Recall" in result
+        assert "Majestic Brain Memory Recall" in result
         assert "Python is great" in result
         p.shutdown()
 
@@ -369,8 +459,42 @@ class TestGBrainProvider:
     def test_get_tool_schemas(self, tmp_path):
         p = self._make_provider(tmp_path)
         schemas = p.get_tool_schemas()
-        assert len(schemas) == 1
-        assert schemas[0]["name"] == "gbrain_note"
+        assert len(schemas) == 2
+        schema_names = {s["name"] for s in schemas}
+        assert "majestic_brain_note" in schema_names
+        assert "gbrain_note" in schema_names
+        p.shutdown()
+
+    def test_legacy_tool_name_still_accepted(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        result = json.loads(p.handle_tool_call("gbrain_note", {
+            "action": "add", "content": "Legacy add still works"
+        }))
+        assert result["duplicate"] is False
+        assert "note_id" in result
+        p.shutdown()
+
+    def test_primary_tool_name_adds_provenance(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        result = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "add",
+            "content": "Cron artifact about #shipping",
+            "note_kind": "artifact",
+            "source_type": "cron_report",
+            "source_ref": "cron:weekly-summary",
+            "metadata": {"job_id": "weekly-summary"},
+        }))
+        assert result["note_kind"] == "artifact"
+        assert result["source_type"] == "cron_report"
+        assert result["duplicate"] is False
+        search = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "search", "query": "Cron artifact"
+        }))
+        row = search["results"][0]
+        assert row["content_hash"] == result["content_hash"]
+        assert row["note_kind"] == "artifact"
+        assert row["source_type"] == "cron_report"
+        assert row["source_ref"] == "cron:weekly-summary"
         p.shutdown()
 
     def test_handle_add(self, tmp_path):
@@ -479,6 +603,11 @@ class TestGBrainProvider:
             "action": "search", "query": "dark mode"
         }))
         assert result["count"] >= 1
+        row = result["results"][0]
+        assert row["note_kind"] == "fact"
+        assert row["source_type"] == "memory_write"
+        assert row["source_ref"] == "user"
+        assert row["metadata"] == {"action": "add", "target": "user"}
         p.shutdown()
 
     def test_on_memory_write_not_add(self, tmp_path):

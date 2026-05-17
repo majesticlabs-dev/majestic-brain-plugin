@@ -1,4 +1,4 @@
-r"""Deterministic entity extractor for GBrain.
+r"""Deterministic entity extractor for Majestic Brain (formerly GBrain).
 
 Extracts structured entities from free-text notes using pure regex.
 No model calls, no network — fully deterministic.

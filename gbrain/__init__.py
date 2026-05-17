@@ -1,4 +1,4 @@
-"""GBrain memory provider — local SQLite/FTS5 note store with deterministic extraction.
+"""Majestic Brain memory provider — local SQLite/FTS5 note store with deterministic extraction.
 
 Registers as a MemoryProvider plugin. Uses local SQLite with FTS5 for full-text
 search, deterministic regex extraction of URLs/file paths/@handles/#tags/quoted
@@ -8,6 +8,10 @@ No network calls, no model calls, no external dependencies. Disabled unless
 activated via ``memory.provider: gbrain`` in config.yaml.
 
 Storage: ``<hermes_home>/gbrain/gbrain.db``
+
+Legacy compatibility: accepts both ``majestic_brain_note`` (primary) and
+``gbrain_note`` (legacy) tool names. Provider name reports ``gbrain`` for
+existing config compatibility; ``majestic-brain`` is accepted via matching aliases.
 """
 
 from __future__ import annotations
@@ -17,18 +21,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    from agent.memory_provider import MemoryProvider
-    from tools.registry import tool_error
-    _HERMES_RUNTIME_AVAILABLE = True
-except ModuleNotFoundError:
-    # Allow standalone imports of gbrain.extractor/store outside the Hermes
-    # runtime. Provider registration still requires Hermes.
-    MemoryProvider = object  # type: ignore[assignment]
-    _HERMES_RUNTIME_AVAILABLE = False
-
-    def tool_error(message: str) -> str:
-        return json.dumps({"error": message})
+from agent.memory_provider import MemoryProvider
+from tools.registry import tool_error
 
 from .store import GBrainStore
 
@@ -38,17 +32,18 @@ logger = logging.getLogger(__name__)
 # Tool schemas
 # ---------------------------------------------------------------------------
 
-GBRAIN_NOTE_SCHEMA = {
-    "name": "gbrain_note",
+MAJESTIC_BRAIN_NOTE_SCHEMA = {
+    "name": "majestic_brain_note",
     "description": (
-        "GBrain local note memory. Stores notes with auto-extracted entities "
+        "Majestic Brain local note memory. Stores notes with auto-extracted entities "
         "(URLs, file paths, @handles, #tags, quoted phrases, capitalized names, "
         "AKA aliases) and links them into a searchable graph.\n\n"
         "ACTIONS:\n"
-        "  add    — Store a note. Returns note_id, extracted entities, aliases.\n"
+        "  add    — Store a note. Returns note_id, extracted entities, aliases, "
+        "content_hash, note_kind, source_type, duplicate.\n"
         "  search — Full-text search. Returns matching notes.\n"
         "  links  — Notes linked via shared entities to a given note_id or entity.\n"
-        "  stats  — Store statistics (note count, entity count, etc.)."
+        "  stats  — Store statistics (note count, entity count, note_kinds, etc.)."
     ),
     "parameters": {
         "type": "object",
@@ -78,10 +73,39 @@ GBRAIN_NOTE_SCHEMA = {
                 "type": "integer",
                 "description": "Max results (default: 10).",
             },
+            "note_kind": {
+                "type": "string",
+                "description": "Note kind: fact|episodic|semantic|artifact (default: fact).",
+            },
+            "source_type": {
+                "type": "string",
+                "description": "Source type: manual|memory_write|cron_report|auto_fetch_artifact|import|unknown (default: manual).",
+            },
+            "source_ref": {
+                "type": "string",
+                "description": "Source reference (e.g., URL, file path).",
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional JSON-serializable provenance metadata.",
+            },
         },
         "required": ["action"],
     },
 }
+
+# Legacy schema kept for backward compatibility
+GBRAIN_NOTE_SCHEMA = {
+    "name": "gbrain_note",
+    "description": (
+        "[Legacy] Use majestic_brain_note instead. "
+        "GBrain local note memory. Stores notes with auto-extracted entities."
+    ),
+    "parameters": MAJESTIC_BRAIN_NOTE_SCHEMA["parameters"],
+}
+
+# Tools we accept in handle_tool_call
+_ACCEPTED_TOOL_NAMES = {"majestic_brain_note", "gbrain_note"}
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +113,15 @@ GBRAIN_NOTE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 class GBrainProvider(MemoryProvider):
-    """GBrain memory provider — SQLite/FTS5 with deterministic extraction."""
+    """Majestic Brain memory provider — SQLite/FTS5 with deterministic extraction.
+
+    Primary name is 'gbrain' for config/discovery compatibility.
+    Display name is 'Majestic Brain' for user-facing messages.
+    Legacy 'gbrain' and new 'majestic-brain' are both accepted for matching.
+    """
+
+    # All provider names that Hermes discovery may use to match this provider.
+    _ALL_NAMES = frozenset({"gbrain", "majestic-brain"})
 
     def __init__(self) -> None:
         self._store: Optional[GBrainStore] = None
@@ -98,7 +130,33 @@ class GBrainProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
+        """Return 'gbrain' — the name that matches config `memory.provider: gbrain`.
+
+        This is the config-matching name, not the display name.
+        """
         return "gbrain"
+
+    @property
+    def legacy_name(self) -> str:
+        """Legacy provider name for backward compatibility."""
+        return "gbrain"
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable name for UI/logging."""
+        return "Majestic Brain"
+
+    @property
+    def names(self) -> frozenset:
+        """All provider names accepted for matching."""
+        return self._ALL_NAMES
+
+    def matches_name(self, candidate: str) -> bool:
+        """Check whether this provider matches the given name.
+
+        Accepts both 'gbrain' (legacy/config) and 'majestic-brain' (new).
+        """
+        return candidate in self._ALL_NAMES
 
     def is_available(self) -> bool:
         """Always available — SQLite is in stdlib, no external deps needed."""
@@ -115,7 +173,7 @@ class GBrainProvider(MemoryProvider):
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "gbrain.db"
         self._store = GBrainStore(db_path)
-        logger.info("GBrain initialized: db=%s, fts5=%s",
+        logger.info("Majestic Brain initialized: db=%s, fts5=%s",
                      db_path, self._store._has_fts5)
 
     def system_prompt_block(self) -> str:
@@ -130,16 +188,19 @@ class GBrainProvider(MemoryProvider):
         entities = stats.get("total_entities", 0)
         if notes == 0:
             return (
-                "# GBrain Memory\n"
-                "Active. Empty note store — use gbrain_note(action='add') to store "
-                "notes with auto-extracted entities (URLs, paths, handles, tags, aliases).\n"
-                "Use gbrain_note(action='search') to recall notes.\n"
-                "Use gbrain_note(action='links') to find related notes."
+                "# Majestic Brain Memory\n"
+                "Active. Empty note store — use majestic_brain_note(action='add') to store "
+                "notes with auto-extracted entities (URLs, paths, handles, tags, aliases). "
+                "Supports note_kind (fact|episodic|semantic|artifact) and source tracking.\n"
+                "Use majestic_brain_note(action='search') to recall notes.\n"
+                "Use majestic_brain_note(action='links') to find related notes.\n"
+                "[Legacy tool name 'gbrain_note' also accepted.]"
             )
         return (
-            f"# GBrain Memory\n"
+            f"# Majestic Brain Memory\n"
             f"Active. {notes} notes, {entities} entities. "
-            f"Use gbrain_note to add, search, or find linked notes."
+            f"Use majestic_brain_note to add, search, or find linked notes.\n"
+            f"[Legacy tool name 'gbrain_note' also accepted.]"
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -150,26 +211,26 @@ class GBrainProvider(MemoryProvider):
             results = self._store.search(query, limit=5)
             if not results:
                 return ""
-            lines = ["## GBrain Memory Recall"]
+            lines = ["## Majestic Brain Memory Recall"]
             for r in results:
                 lines.append(f"- [note {r['note_id']}] {r['content'][:200]}")
             return "\n".join(lines)
         except Exception as e:
-            logger.debug("GBrain prefetch failed: %s", e)
+            logger.debug("Majestic Brain prefetch failed: %s", e)
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """GBrain doesn't auto-sync turns — only explicit tool calls and on_memory_write."""
+        """Majestic Brain doesn't auto-sync turns — only explicit tool calls and on_memory_write."""
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [GBRAIN_NOTE_SCHEMA]
+        return [MAJESTIC_BRAIN_NOTE_SCHEMA, GBRAIN_NOTE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        if tool_name != "gbrain_note":
+        if tool_name not in _ACCEPTED_TOOL_NAMES:
             return tool_error(f"Unknown tool: {tool_name}")
         if not self._store:
-            return json.dumps({"error": "GBrain not initialized"})
+            return json.dumps({"error": "Majestic Brain not initialized"})
 
         action = args.get("action", "")
         try:
@@ -193,12 +254,24 @@ class GBrainProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mirror built-in memory writes into the GBrain store."""
+        """Mirror built-in memory writes into the Majestic Brain store."""
         if action == "add" and self._store and content:
             try:
-                self._store.add_note(content)
+                mem_meta = {
+                    "action": action,
+                    "target": target,
+                }
+                if metadata:
+                    mem_meta.update(metadata)
+                self._store.add_note(
+                    content,
+                    note_kind="fact",
+                    source_type="memory_write",
+                    source_ref=target,
+                    metadata=mem_meta,
+                )
             except Exception as e:
-                logger.debug("GBrain memory_write mirror failed: %s", e)
+                logger.debug("Majestic Brain memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
         if self._store:
@@ -211,7 +284,17 @@ class GBrainProvider(MemoryProvider):
         content = args.get("content", "").strip()
         if not content:
             return json.dumps({"error": "content is required"})
-        result = self._store.add_note(content)
+        note_kind = args.get("note_kind", "fact")
+        source_type = args.get("source_type", "manual")
+        source_ref = args.get("source_ref", "")
+        metadata = args.get("metadata")
+        result = self._store.add_note(
+            content,
+            note_kind=note_kind,
+            source_type=source_type,
+            source_ref=source_ref,
+            metadata=metadata,
+        )
         return json.dumps(result)
 
     def _handle_search(self, args: dict) -> str:
@@ -245,8 +328,6 @@ class GBrainProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    """Register the GBrain memory provider with the plugin system."""
-    if not _HERMES_RUNTIME_AVAILABLE:
-        raise RuntimeError("GBrain provider registration requires the Hermes runtime")
+    """Register the Majestic Brain memory provider with the plugin system."""
     provider = GBrainProvider()
     ctx.register_memory_provider(provider)

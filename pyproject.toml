@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-gbrain-plugin"
-version = "0.1.0"
-description = "GBrain — local SQLite/FTS5 note store with deterministic entity extraction for Hermes Agent"
+name = "hermes-majestic-brain-plugin"
+version = "0.2.0"
+description = "Majestic Brain — local SQLite/FTS5 note store with deterministic entity extraction, content-hash dedup, and provenance tracking for Hermes Agent"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ authors = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

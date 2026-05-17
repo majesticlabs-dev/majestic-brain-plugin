@@ -1,18 +1,24 @@
-"""SQLite/FTS5-backed note store for GBrain.
+"""SQLite/FTS5-backed note store for Majestic Brain (formerly GBrain).
 
 Stores notes with extracted entities and supports full-text search with
 an automatic FTS5 fallback to LIKE when FTS5 is unavailable.
 
 Thread-safe via an RLock. Profile-scoped: each store lives at
 ``<hermes_home>/gbrain/gbrain.db``.
+
+OpenHuman-style memory primitives: content_hash deduplication,
+provenance fields (note_kind, source_type, source_ref, metadata_json),
+and deterministic markdown mirror export.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,10 +26,59 @@ from .extractor import extract, all_entity_names
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Validation constants
+# ---------------------------------------------------------------------------
+
+VALID_NOTE_KINDS = {"fact", "episodic", "semantic", "artifact"}
+VALID_SOURCE_TYPES = {
+    "manual",
+    "memory_write",
+    "cron_report",
+    "auto_fetch_artifact",
+    "import",
+    "unknown",
+}
+
+DEFAULT_NOTE_KIND = "fact"
+DEFAULT_SOURCE_TYPE = "manual"
+
 
 def _escape_like(value: str) -> str:
     """Escape user input for SQLite LIKE patterns."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _content_hash(content: str) -> str:
+    """SHA-256 hex digest of stripped content for deduplication."""
+    return hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC time as ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_yaml_value(value: Any) -> str:
+    """Format a value for simple YAML-like frontmatter without PyYAML."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        # Escape any double-quote chars, wrap in double quotes
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, (list, tuple)):
+        inner = ", ".join(_safe_yaml_value(v) for v in value)
+        return f"[{inner}]"
+    if isinstance(value, dict):
+        # JSON is valid YAML for simple dicts
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -31,10 +86,16 @@ def _escape_like(value: str) -> str:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
-    note_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    content     TEXT NOT NULL,
-    entities    TEXT DEFAULT '{}',
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    note_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    content       TEXT NOT NULL,
+    entities      TEXT DEFAULT '{}',
+    content_hash  TEXT NOT NULL DEFAULT '',
+    note_kind     TEXT NOT NULL DEFAULT 'fact',
+    source_type   TEXT NOT NULL DEFAULT 'manual',
+    source_ref    TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT DEFAULT NULL,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -76,11 +137,35 @@ CREATE TRIGGER IF NOT EXISTS notes_fts_au AFTER UPDATE ON notes BEGIN
 END;
 """
 
+# Migration: add new columns to pre-existing databases that lack them.
+_MIGRATIONS = [
+    "ALTER TABLE notes ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE notes ADD COLUMN note_kind TEXT NOT NULL DEFAULT 'fact'",
+    "ALTER TABLE notes ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'",
+    "ALTER TABLE notes ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE notes ADD COLUMN metadata_json TEXT DEFAULT NULL",
+    "ALTER TABLE notes ADD COLUMN updated_at TIMESTAMP DEFAULT ''",
+]
+
+_CREATE_INDEX_HASH = (
+    "CREATE INDEX IF NOT EXISTS idx_notes_content_hash ON notes(content_hash)"
+)
+
 
 class GBrainStore:
-    """SQLite-backed note store with FTS5 and entity linking."""
+    """SQLite-backed note store with FTS5, entity linking, and memory primitives.
 
-    def __init__(self, db_path: str | Path) -> None:
+    Attributes:
+        db_path: Path to the SQLite database file.
+        markdown_dir: Path to the markdown mirror directory (or None if disabled).
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        markdown_dir: Optional[str | Path] = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -94,6 +179,13 @@ class GBrainStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._has_fts5 = self._init_db()
 
+        # Markdown mirror directory
+        if markdown_dir is not None:
+            self.markdown_dir = Path(markdown_dir)
+        else:
+            self.markdown_dir = self.db_path.parent / "markdown"
+        self.markdown_dir.mkdir(parents=True, exist_ok=True)
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -103,35 +195,141 @@ class GBrainStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            # Apply migrations for existing databases
+            self._apply_migrations()
             try:
                 self._conn.executescript(_FTS_SCHEMA)
+                self._conn.execute("INSERT INTO notes_fts(notes_fts) VALUES ('rebuild')")
                 self._conn.commit()
                 return True
             except sqlite3.OperationalError:
                 logger.info("FTS5 not available, falling back to LIKE search")
                 return False
 
+    def _apply_migrations(self) -> None:
+        """Add new columns to existing databases (idempotent)."""
+        # Get current column names
+        cursor = self._conn.execute("PRAGMA table_info(notes)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        for migration_sql in _MIGRATIONS:
+            # Extract column name from ALTER TABLE ... ADD COLUMN <name> ...
+            # Pattern: ALTER TABLE notes ADD COLUMN colname ...
+            parts = migration_sql.split()
+            if len(parts) >= 6 and parts[0] == "ALTER" and parts[3] == "ADD" and parts[4] == "COLUMN":
+                col_name = parts[5]
+                if col_name not in existing_cols:
+                    try:
+                        self._conn.execute(migration_sql)
+                        existing_cols.add(col_name)
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists or other safe skip
+
+        # Backfill hashes for rows that predate content-addressed storage.
+        try:
+            rows = self._conn.execute(
+                "SELECT note_id, content FROM notes WHERE content_hash = '' OR content_hash IS NULL"
+            ).fetchall()
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE notes SET content_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE note_id = ?",
+                    (_content_hash(row["content"]), row["note_id"]),
+                )
+        except sqlite3.OperationalError:
+            pass
+
+        # Ensure index exists
+        try:
+            self._conn.execute(_CREATE_INDEX_HASH)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
     # ------------------------------------------------------------------
     # Write operations
     # ------------------------------------------------------------------
 
-    def add_note(self, content: str) -> Dict[str, Any]:
+    def add_note(
+        self,
+        content: str,
+        *,
+        note_kind: str = DEFAULT_NOTE_KIND,
+        source_type: str = DEFAULT_SOURCE_TYPE,
+        source_ref: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Insert a note, extract and link entities.
 
-        Returns dict with note_id, entities (dict), and aliases (list of pairs).
+        Deduplicates by content_hash — if the exact content already exists,
+        returns the existing note_id with ``duplicate=True``.
+
+        Returns dict with note_id, entities, aliases, content_hash,
+        note_kind, source_type, duplicate.
         """
         content = content.strip()
         if not content:
             raise ValueError("content must not be empty")
 
+        # Validate provenance fields
+        if note_kind not in VALID_NOTE_KINDS:
+            raise ValueError(
+                f"Invalid note_kind '{note_kind}'. Must be one of: {sorted(VALID_NOTE_KINDS)}"
+            )
+        if source_type not in VALID_SOURCE_TYPES:
+            raise ValueError(
+                f"Invalid source_type '{source_type}'. Must be one of: {sorted(VALID_SOURCE_TYPES)}"
+            )
+
+        content_hash = _content_hash(content)
         entities = extract(content)
         entity_names = all_entity_names(entities)
         aliases = entities.get("aliases", [])
 
         with self._lock:
+            # Deduplication check
+            existing = self._conn.execute(
+                """
+                SELECT note_id, note_kind, source_type, source_ref, metadata_json
+                FROM notes
+                WHERE content_hash = ?
+                LIMIT 1
+                """,
+                (content_hash,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "note_id": existing["note_id"],
+                    "entities": entities,
+                    "aliases": aliases,
+                    "content_hash": content_hash,
+                    "note_kind": existing["note_kind"],
+                    "source_type": existing["source_type"],
+                    "source_ref": existing["source_ref"],
+                    "metadata_json": existing["metadata_json"],
+                    "duplicate": True,
+                }
+
+            metadata_json = json.dumps(metadata) if metadata else None
+            now = _utc_now_iso()
+
             cur = self._conn.execute(
-                "INSERT INTO notes (content, entities) VALUES (?, ?)",
-                (content, json.dumps(entities)),
+                (
+                    "INSERT INTO notes "
+                    "(content, entities, content_hash, note_kind, source_type, "
+                    "source_ref, metadata_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                ),
+                (
+                    content,
+                    json.dumps(entities),
+                    content_hash,
+                    note_kind,
+                    source_type,
+                    source_ref,
+                    metadata_json,
+                    now,
+                    now,
+                ),
             )
             note_id: int = cur.lastrowid  # type: ignore[assignment]
 
@@ -146,11 +344,64 @@ class GBrainStore:
 
             self._conn.commit()
 
+        # Write markdown mirror (outside the lock for performance)
+        self._write_markdown_mirror(note_id, content, content_hash, note_kind,
+                                     source_type, source_ref, entities, now)
+
         return {
             "note_id": note_id,
             "entities": entities,
             "aliases": aliases,
+            "content_hash": content_hash,
+            "note_kind": note_kind,
+            "source_type": source_type,
+            "source_ref": source_ref,
+            "metadata_json": metadata_json,
+            "duplicate": False,
         }
+
+    # ------------------------------------------------------------------
+    # Markdown mirror
+    # ------------------------------------------------------------------
+
+    def _write_markdown_mirror(
+        self,
+        note_id: int,
+        content: str,
+        content_hash: str,
+        note_kind: str,
+        source_type: str,
+        source_ref: str,
+        entities: Dict[str, Any],
+        created_at: str,
+    ) -> None:
+        """Write a human-readable .md file for the note."""
+        try:
+            md_path = self.markdown_dir / f"note_{note_id:06d}.md"
+            lines: List[str] = []
+            lines.append("---")
+            lines.append(f"note_id: {note_id}")
+            lines.append(f"content_hash: {content_hash}")
+            lines.append(f"note_kind: {note_kind}")
+            lines.append(f"source_type: {source_type}")
+            lines.append(f"source_ref: {_safe_yaml_value(source_ref)}")
+            lines.append(f"created_at: {_safe_yaml_value(created_at)}")
+
+            # Entities as a simplified representation
+            entity_names = all_entity_names(entities)
+            if entity_names:
+                lines.append(f"entities: {_safe_yaml_value(entity_names)}")
+            else:
+                lines.append("entities: []")
+
+            lines.append("---")
+            lines.append("")
+            lines.append(content)
+            lines.append("")
+
+            md_path.write_text("\n".join(lines), encoding="utf-8")
+        except Exception as e:
+            logger.debug("Markdown mirror write failed for note %s: %s", note_id, e)
 
     # ------------------------------------------------------------------
     # Search
@@ -180,7 +431,9 @@ class GBrainStore:
     def _search_fts(self, query: str, limit: int) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
             """
-            SELECT n.note_id, n.content, n.entities, n.created_at
+            SELECT n.note_id, n.content, n.entities, n.created_at,
+                   n.content_hash, n.note_kind, n.source_type, n.source_ref,
+                   n.metadata_json
             FROM notes n
             JOIN notes_fts fts ON fts.rowid = n.note_id
             WHERE notes_fts MATCH ?
@@ -195,7 +448,9 @@ class GBrainStore:
         pattern = f"%{_escape_like(query)}%"
         rows = self._conn.execute(
             """
-            SELECT note_id, content, entities, created_at
+            SELECT note_id, content, entities, created_at,
+                   content_hash, note_kind, source_type, source_ref,
+                   metadata_json
             FROM notes
             WHERE content LIKE ? ESCAPE '\\'
             ORDER BY note_id DESC
@@ -218,6 +473,8 @@ class GBrainStore:
             rows = self._conn.execute(
                 """
                 SELECT n.note_id, n.content, n.entities, n.created_at,
+                       n.content_hash, n.note_kind, n.source_type, n.source_ref,
+                       n.metadata_json,
                        COUNT(*) AS shared_entities
                 FROM notes n
                 JOIN note_entities ne ON ne.note_id = n.note_id
@@ -246,7 +503,9 @@ class GBrainStore:
                 return []
             rows = self._conn.execute(
                 """
-                SELECT n.note_id, n.content, n.entities, n.created_at
+                SELECT n.note_id, n.content, n.entities, n.created_at,
+                       n.content_hash, n.note_kind, n.source_type, n.source_ref,
+                       n.metadata_json
                 FROM notes n
                 JOIN note_entities ne ON ne.note_id = n.note_id
                 WHERE ne.entity_id = ?
@@ -272,11 +531,24 @@ class GBrainStore:
             total_aliases = self._conn.execute(
                 "SELECT COUNT(*) FROM entities WHERE aliases != '' AND aliases IS NOT NULL"
             ).fetchone()[0]
+
+            # Note kind breakdown
+            note_kinds = {}
+            try:
+                rows = self._conn.execute(
+                    "SELECT note_kind, COUNT(*) as cnt FROM notes GROUP BY note_kind"
+                ).fetchall()
+                note_kinds = {row["note_kind"]: row["cnt"] for row in rows}
+            except sqlite3.OperationalError:
+                pass  # Pre-migration DB
+
         return {
             "total_notes": total_notes,
             "total_entities": total_entities,
             "total_aliases": total_aliases,
+            "note_kinds": note_kinds,
             "db_path": str(self.db_path),
+            "markdown_dir": str(self.markdown_dir),
             "fts5": self._has_fts5,
         }
 
@@ -349,6 +621,15 @@ class GBrainStore:
         if "entities" in d and isinstance(d["entities"], str):
             try:
                 d["entities"] = json.loads(d["entities"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if (
+            "metadata_json" in d
+            and isinstance(d["metadata_json"], str)
+            and d["metadata_json"]
+        ):
+            try:
+                d["metadata"] = json.loads(d["metadata_json"])
             except (json.JSONDecodeError, TypeError):
                 pass
         return d
