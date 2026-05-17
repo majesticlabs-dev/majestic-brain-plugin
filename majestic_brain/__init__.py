@@ -178,9 +178,9 @@ class MajesticBrainProvider(MemoryProvider):
             from hermes_constants import get_hermes_home
             self._hermes_home = str(get_hermes_home())
 
-        db_dir = Path(self._hermes_home) / "gbrain"
+        db_dir = Path(self._hermes_home) / "majestic-brain"
         db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = db_dir / "gbrain.db"
+        db_path = db_dir / "majestic_brain.db"
         self._store = MajesticBrainStore(db_path)
         logger.info("Majestic Brain initialized: db=%s, fts5=%s",
                      db_path, self._store._has_fts5)
