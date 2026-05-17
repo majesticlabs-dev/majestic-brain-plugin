@@ -404,8 +404,11 @@ class TestGBrainProvider:
     def test_name(self):
         from gbrain import GBrainProvider
         p = GBrainProvider()
-        assert p.name == "majestic-brain"
+        assert p.name == "gbrain"
         assert p.legacy_name == "gbrain"
+        assert p.display_name == "Majestic Brain"
+        assert p.matches_name("gbrain")
+        assert p.matches_name("majestic-brain")
 
     def test_is_available(self):
         from gbrain import GBrainProvider
@@ -456,8 +459,10 @@ class TestGBrainProvider:
     def test_get_tool_schemas(self, tmp_path):
         p = self._make_provider(tmp_path)
         schemas = p.get_tool_schemas()
-        assert len(schemas) == 1
-        assert schemas[0]["name"] == "majestic_brain_note"
+        assert len(schemas) == 2
+        schema_names = {s["name"] for s in schemas}
+        assert "majestic_brain_note" in schema_names
+        assert "gbrain_note" in schema_names
         p.shutdown()
 
     def test_legacy_tool_name_still_accepted(self, tmp_path):

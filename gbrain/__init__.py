@@ -10,8 +10,8 @@ activated via ``memory.provider: gbrain`` in config.yaml.
 Storage: ``<hermes_home>/gbrain/gbrain.db``
 
 Legacy compatibility: accepts both ``majestic_brain_note`` (primary) and
-``gbrain_note`` (legacy) tool names. Provider name reports ``majestic-brain``
-with legacy alias support.
+``gbrain_note`` (legacy) tool names. Provider name reports ``gbrain`` for
+existing config compatibility; ``majestic-brain`` is accepted via matching aliases.
 """
 
 from __future__ import annotations
@@ -115,9 +115,13 @@ _ACCEPTED_TOOL_NAMES = {"majestic_brain_note", "gbrain_note"}
 class GBrainProvider(MemoryProvider):
     """Majestic Brain memory provider — SQLite/FTS5 with deterministic extraction.
 
-    Primary name is 'majestic-brain'. Legacy 'gbrain' name is accepted
-    for backward compatibility.
+    Primary name is 'gbrain' for config/discovery compatibility.
+    Display name is 'Majestic Brain' for user-facing messages.
+    Legacy 'gbrain' and new 'majestic-brain' are both accepted for matching.
     """
+
+    # All provider names that Hermes discovery may use to match this provider.
+    _ALL_NAMES = frozenset({"gbrain", "majestic-brain"})
 
     def __init__(self) -> None:
         self._store: Optional[GBrainStore] = None
@@ -126,12 +130,33 @@ class GBrainProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
-        return "majestic-brain"
+        """Return 'gbrain' — the name that matches config `memory.provider: gbrain`.
+
+        This is the config-matching name, not the display name.
+        """
+        return "gbrain"
 
     @property
     def legacy_name(self) -> str:
         """Legacy provider name for backward compatibility."""
         return "gbrain"
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable name for UI/logging."""
+        return "Majestic Brain"
+
+    @property
+    def names(self) -> frozenset:
+        """All provider names accepted for matching."""
+        return self._ALL_NAMES
+
+    def matches_name(self, candidate: str) -> bool:
+        """Check whether this provider matches the given name.
+
+        Accepts both 'gbrain' (legacy/config) and 'majestic-brain' (new).
+        """
+        return candidate in self._ALL_NAMES
 
     def is_available(self) -> bool:
         """Always available — SQLite is in stdlib, no external deps needed."""
@@ -199,7 +224,7 @@ class GBrainProvider(MemoryProvider):
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [MAJESTIC_BRAIN_NOTE_SCHEMA]
+        return [MAJESTIC_BRAIN_NOTE_SCHEMA, GBRAIN_NOTE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name not in _ACCEPTED_TOOL_NAMES:
