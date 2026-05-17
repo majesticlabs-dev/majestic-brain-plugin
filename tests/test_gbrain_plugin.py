@@ -1,14 +1,15 @@
-"""Tests for the GBrain memory provider plugin.
+"""Tests for the Majestic Brain / GBrain memory provider plugin.
 
 Covers:
   - extractor: all entity types, dedup, edge cases
   - store: add_note, search (FTS5 + LIKE fallback), entity linking, stats
   - provider: lifecycle, tool dispatch, prefetch, on_memory_write
+  - imports: both majestic_brain and gbrain import paths work
 
-NOTE: Provider tests (TestGBrainProvider) require the Hermes runtime imports
-``agent.memory_provider`` and ``tools.registry`` to be importable. If those
-are unavailable (e.g. running outside the hermes-agent tree), those tests are
-automatically skipped.
+NOTE: Provider tests (TestGBrainProvider, TestMajesticBrainProvider) require
+the Hermes runtime imports ``agent.memory_provider`` and ``tools.registry`` to
+be importable. If those are unavailable (e.g. running outside the hermes-agent
+tree), those tests are automatically skipped.
 
 Extractor and Store tests have zero external dependencies — they run everywhere.
 """
@@ -24,13 +25,49 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path setup — ensure repo root is on sys.path for ``gbrain.*`` imports
-# ---------------------------------------------------------------------------
+# Path setup handled by conftest.py — repo root and optional Hermes agent dir
+# are already on sys.path.
 
-_repo_root = str(Path(__file__).resolve().parent.parent)
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
+# ===========================================================================
+# Import path tests
+# ===========================================================================
+
+class TestImportPaths:
+    """Verify both majestic_brain and gbrain import paths work."""
+
+    def test_import_majestic_brain_provider(self):
+        from majestic_brain import MajesticBrainProvider
+        p = MajesticBrainProvider()
+        assert p.name == "majestic-brain"
+        assert p.display_name == "Majestic Brain"
+
+    def test_import_gbrain_provider_legacy(self):
+        from gbrain import GBrainProvider
+        p = GBrainProvider()
+        assert p.name == "majestic-brain"
+
+    def test_gbrain_provider_is_majestic_brain_provider(self):
+        from gbrain import GBrainProvider
+        from majestic_brain import MajesticBrainProvider
+        assert GBrainProvider is MajesticBrainProvider
+
+    def test_import_majestic_brain_store(self):
+        from majestic_brain.store import MajesticBrainStore
+        assert MajesticBrainStore is not None
+
+    def test_import_gbrain_store_legacy(self):
+        from gbrain.store import GBrainStore
+        assert GBrainStore is not None
+
+    def test_gbrain_store_is_majestic_brain_store(self):
+        from gbrain.store import GBrainStore
+        from majestic_brain.store import MajesticBrainStore
+        assert GBrainStore is MajesticBrainStore
+
+    def test_import_extractor_from_both(self):
+        from majestic_brain.extractor import extract as mb_extract
+        from gbrain.extractor import extract as gb_extract
+        assert mb_extract is gb_extract
 
 
 # ===========================================================================
@@ -41,80 +78,76 @@ class TestExtractor:
     """Test deterministic entity extraction."""
 
     def test_extract_urls(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("Check out https://example.com and http://test.org/path")
         assert "https://example.com" in result["urls"]
         assert "http://test.org/path" in result["urls"]
 
     def test_extract_file_paths(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("Edit src/main.py and ~/.config/hermes/config.yaml")
-        # Should find at least the file paths
         paths = result["file_paths"]
         assert any("main.py" in p for p in paths)
         assert any("config.yaml" in p for p in paths)
 
     def test_extract_handles(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("Ask @alice and @bob about this")
         assert "alice" in result["handles"]
         assert "bob" in result["handles"]
 
     def test_extract_tags(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("This is about #python and #testing")
         assert "python" in result["tags"]
         assert "testing" in result["tags"]
 
     def test_extract_quoted_phrases(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract('He said "Hello World" and \'goodbye\'')
         assert "Hello World" in result["quoted"]
         assert "goodbye" in result["quoted"]
 
     def test_extract_capitalized_phrases(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("John Doe went to New York yesterday")
         assert "John Doe" in result["capped"]
         assert "New York" in result["capped"]
 
     def test_extract_aka_aliases(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("David aka Dave also known as Coder")
         aliases = result["aliases"]
-        # Two AKA patterns: David→Dave, Dave→Coder
         assert len(aliases) >= 1
         flat = [n.lower() for pair in aliases for n in pair]
         assert "david" in flat or "dave" in flat
 
     def test_extract_aka_simple(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("Robert aka Bob is here")
         aliases = result["aliases"]
         assert len(aliases) == 1
         assert aliases[0] == ["Robert", "Bob"]
 
     def test_extract_aka_multi_word_needs_quotes(self):
-        from gbrain.extractor import extract
-        # Multi-word aliases should use quotes; single-word AKA extracts cleanly
+        from majestic_brain.extractor import extract
         result = extract('Robert "Bob Smith" aka Bobsy')
-        # "Bob Smith" extracted as quoted, Bobsy as single-word alias target
         assert any("Bobsy" in pair[1] for pair in result["aliases"]) or result["aliases"] == []
 
     def test_deduplication(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("Use #python because #python is great and #python rocks")
         assert result["tags"].count("python") == 1
 
     def test_empty_input(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         result = extract("")
         assert result["urls"] == []
         assert result["handles"] == []
         assert result["aliases"] == []
 
     def test_all_entity_names(self):
-        from gbrain.extractor import extract, all_entity_names
+        from majestic_brain.extractor import extract, all_entity_names
         entities = extract("@alice met Bob Smith at #meeting")
         names = all_entity_names(entities)
         assert "alice" in names
@@ -122,15 +155,13 @@ class TestExtractor:
         assert "meeting" in names
 
     def test_no_false_positive_caps(self):
-        from gbrain.extractor import extract
-        # Single capitalized words should NOT be extracted as capped phrases
+        from majestic_brain.extractor import extract
         result = extract("The Quick brown fox jumped")
-        # Just check that single-word caps don't pollute capped list
         for item in result["capped"]:
             assert len(item.split()) >= 2
 
     def test_file_path_regex_handles_long_dotted_text_quickly(self):
-        from gbrain.extractor import extract
+        from majestic_brain.extractor import extract
         text = ("a." * 30000) + "done"
         start = time.monotonic()
         result = extract(text)
@@ -138,13 +169,84 @@ class TestExtractor:
         assert result["file_paths"] == []
         assert elapsed < 0.5
 
+    def test_extractor_via_gbrain_import(self):
+        """Extractor also works via the legacy gbrain shim."""
+        from gbrain.extractor import extract
+        result = extract("Visit #legacy and @handle")
+        assert "legacy" in result["tags"]
+        assert "handle" in result["handles"]
+
 
 # ===========================================================================
-# Store tests
+# Store tests (MajesticBrainStore — canonical)
+# ===========================================================================
+
+class TestMajesticBrainStore:
+    """Test the SQLite store via the canonical MajesticBrainStore class."""
+
+    def _make_store(self, tmp_path):
+        from majestic_brain.store import MajesticBrainStore
+        db_path = tmp_path / "test_mb.db"
+        return MajesticBrainStore(db_path)
+
+    def test_add_note_returns_id_and_entities(self, tmp_path):
+        store = self._make_store(tmp_path)
+        result = store.add_note("Meet @alice at #meeting about Project Alpha")
+        assert "note_id" in result
+        assert isinstance(result["note_id"], int)
+        assert "entities" in result
+        assert "alice" in result["entities"]["handles"]
+        assert "meeting" in result["entities"]["tags"]
+        store.close()
+
+    def test_search_finds_note(self, tmp_path):
+        store = self._make_store(tmp_path)
+        store.add_note("Python is my favorite programming language")
+        results = store.search("Python")
+        assert len(results) >= 1
+        assert any("Python" in r["content"] for r in results)
+        store.close()
+
+    def test_entity_linking(self, tmp_path):
+        store = self._make_store(tmp_path)
+        r1 = store.add_note("@alice works on Project Alpha")
+        r2 = store.add_note("@alice deployed the system")
+        linked = store.get_linked_notes(r1["note_id"])
+        assert len(linked) >= 1
+        assert any(r["note_id"] == r2["note_id"] for r in linked)
+        store.close()
+
+    def test_content_hash_dedup(self, tmp_path):
+        store = self._make_store(tmp_path)
+        first = store.add_note("Same durable fact")
+        second = store.add_note("Same durable fact")
+        assert first["duplicate"] is False
+        assert second["duplicate"] is True
+        assert second["note_id"] == first["note_id"]
+        store.close()
+
+    def test_stats(self, tmp_path):
+        store = self._make_store(tmp_path)
+        store.add_note("Note one with @handle")
+        store.add_note("Note two with #tag")
+        stats = store.stats()
+        assert stats["total_notes"] == 2
+        assert stats["total_entities"] >= 2
+        store.close()
+
+    def test_add_empty_content_raises(self, tmp_path):
+        store = self._make_store(tmp_path)
+        with pytest.raises(ValueError, match="content must not be empty"):
+            store.add_note("")
+        store.close()
+
+
+# ===========================================================================
+# Store tests (GBrainStore — legacy import path)
 # ===========================================================================
 
 class TestGBrainStore:
-    """Test the SQLite store with real databases."""
+    """Test the SQLite store via the legacy GBrainStore class name."""
 
     def _make_store(self, tmp_path):
         from gbrain.store import GBrainStore
@@ -211,7 +313,6 @@ class TestGBrainStore:
         store = self._make_store(tmp_path)
         store.add_note("Hello world")
         results = store.search("xyzzynonexistent")
-        # FTS5 may return no results, LIKE fallback also won't match
         assert isinstance(results, list)
         store.close()
 
@@ -219,7 +320,6 @@ class TestGBrainStore:
         store = self._make_store(tmp_path)
         r1 = store.add_note("@alice works on Project Alpha")
         r2 = store.add_note("@alice deployed the system")
-        # r1 and r2 share @alice — should be linked
         linked = store.get_linked_notes(r1["note_id"])
         assert len(linked) >= 1
         assert any(r["note_id"] == r2["note_id"] for r in linked)
@@ -271,24 +371,19 @@ class TestGBrainStore:
         store = self._make_store(tmp_path)
         result = store.add_note("Robert aka Bob is the lead")
         assert len(result["aliases"]) >= 1
-        # Bob should be resolvable as entity
         notes = store.get_linked_by_entity("Robert")
-        # At least the note itself should be findable via Robert
         assert len(notes) >= 1
         store.close()
 
     def test_like_fallback_simulated(self, tmp_path):
-        """Verify LIKE search works by disabling FTS5 flag."""
         store = self._make_store(tmp_path)
         store.add_note("Testing the fallback search mechanism")
-        # Force LIKE mode
         store._has_fts5 = False
         results = store.search("fallback")
         assert len(results) >= 1
         store.close()
 
     def test_fts_syntax_error_falls_back_to_like(self, tmp_path):
-        """Raw paths/URLs shouldn't make FTS5 recall brittle."""
         store = self._make_store(tmp_path)
         store.add_note("Edit src/main.py before touching https://example.com/docs")
         results = store.search("src/main.py")
@@ -392,8 +487,138 @@ _hermes_skip = pytest.mark.skipif(
 
 
 @_hermes_skip
+class TestMajesticBrainProvider:
+    """Test the provider via the canonical MajesticBrainProvider import path."""
+
+    def _make_provider(self, tmp_path):
+        from majestic_brain import MajesticBrainProvider
+        provider = MajesticBrainProvider()
+        provider.initialize("test-session", hermes_home=str(tmp_path))
+        return provider
+
+    def test_name(self):
+        from majestic_brain import MajesticBrainProvider
+        p = MajesticBrainProvider()
+        assert p.name == "majestic-brain"
+        assert p.legacy_name == "gbrain"
+        assert p.display_name == "Majestic Brain"
+        assert p.matches_name("gbrain")
+        assert p.matches_name("majestic-brain")
+        assert p.matches_name("majestic_brain")
+
+    def test_is_available(self):
+        from majestic_brain import MajesticBrainProvider
+        p = MajesticBrainProvider()
+        assert p.is_available() is True
+
+    def test_initialize(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        assert p._store is not None
+        assert p._session_id == "test-session"
+        p.shutdown()
+
+    def test_system_prompt_block(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        block = p.system_prompt_block()
+        assert "Majestic Brain Memory" in block
+        assert "Empty" in block
+        p.shutdown()
+
+    def test_system_prompt_block_with_notes(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.handle_tool_call("majestic_brain_note", {"action": "add", "content": "Test note"})
+        block = p.system_prompt_block()
+        assert "1 notes" in block
+        p.shutdown()
+
+    def test_prefetch_empty(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        result = p.prefetch("")
+        assert result == ""
+        p.shutdown()
+
+    def test_prefetch_with_match(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.handle_tool_call("majestic_brain_note", {"action": "add", "content": "Python is great"})
+        result = p.prefetch("Python")
+        assert "Majestic Brain Memory Recall" in result
+        assert "Python is great" in result
+        p.shutdown()
+
+    def test_prefetch_no_match(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.handle_tool_call("majestic_brain_note", {"action": "add", "content": "Hello world"})
+        result = p.prefetch("xyzzyplugh")
+        assert result == ""
+        p.shutdown()
+
+    def test_get_tool_schemas(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        schemas = p.get_tool_schemas()
+        assert len(schemas) == 2
+        schema_names = {s["name"] for s in schemas}
+        assert "majestic_brain_note" in schema_names
+        assert "gbrain_note" in schema_names
+        p.shutdown()
+
+    def test_primary_tool_name_adds_provenance(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        result = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "add",
+            "content": "Cron artifact about #shipping",
+            "note_kind": "artifact",
+            "source_type": "cron_report",
+            "source_ref": "cron:weekly-summary",
+            "metadata": {"job_id": "weekly-summary"},
+        }))
+        assert result["note_kind"] == "artifact"
+        assert result["source_type"] == "cron_report"
+        assert result["duplicate"] is False
+        p.shutdown()
+
+    def test_handle_add(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        result = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "add", "content": "Meet @alice about #project"
+        }))
+        assert "note_id" in result
+        assert result["entities"]["handles"] == ["alice"]
+        p.shutdown()
+
+    def test_handle_search(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.handle_tool_call("majestic_brain_note", {"action": "add", "content": "Deploy with Kubernetes"})
+        result = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "search", "query": "Kubernetes"
+        }))
+        assert result["count"] >= 1
+        p.shutdown()
+
+    def test_on_memory_write(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.on_memory_write("add", "user", "User prefers dark mode")
+        result = json.loads(p.handle_tool_call("majestic_brain_note", {
+            "action": "search", "query": "dark mode"
+        }))
+        assert result["count"] >= 1
+        row = result["results"][0]
+        assert row["source_type"] == "memory_write"
+        p.shutdown()
+
+    def test_shutdown(self, tmp_path):
+        p = self._make_provider(tmp_path)
+        p.shutdown()
+        assert p._store is None
+
+    def test_config_schema_empty(self):
+        from majestic_brain import MajesticBrainProvider
+        p = MajesticBrainProvider()
+        assert p.get_config_schema() == []
+
+
+@_hermes_skip
 class TestGBrainProvider:
-    """Test the MemoryProvider implementation."""
+    """Test the provider via the legacy GBrainProvider import path."""
 
     def _make_provider(self, tmp_path):
         from gbrain import GBrainProvider
@@ -404,7 +629,7 @@ class TestGBrainProvider:
     def test_name(self):
         from gbrain import GBrainProvider
         p = GBrainProvider()
-        assert p.name == "gbrain"
+        assert p.name == "majestic-brain"
         assert p.legacy_name == "gbrain"
         assert p.display_name == "Majestic Brain"
         assert p.matches_name("gbrain")
@@ -425,7 +650,7 @@ class TestGBrainProvider:
         p = self._make_provider(tmp_path)
         block = p.system_prompt_block()
         assert "Majestic Brain Memory" in block
-        assert "Empty" in block  # no notes yet
+        assert "Empty" in block
         p.shutdown()
 
     def test_system_prompt_block_with_notes(self, tmp_path):
@@ -598,7 +823,6 @@ class TestGBrainProvider:
     def test_on_memory_write(self, tmp_path):
         p = self._make_provider(tmp_path)
         p.on_memory_write("add", "user", "User prefers dark mode")
-        # Should be searchable now
         result = json.loads(p.handle_tool_call("gbrain_note", {
             "action": "search", "query": "dark mode"
         }))
@@ -612,7 +836,6 @@ class TestGBrainProvider:
 
     def test_on_memory_write_not_add(self, tmp_path):
         p = self._make_provider(tmp_path)
-        # Only 'add' action should mirror
         p.on_memory_write("remove", "user", "something")
         result = json.loads(p.handle_tool_call("gbrain_note", {
             "action": "search", "query": "something"
@@ -622,7 +845,6 @@ class TestGBrainProvider:
 
     def test_sync_turn_noop(self, tmp_path):
         p = self._make_provider(tmp_path)
-        # Should not raise
         p.sync_turn("user message", "assistant message")
         result = json.loads(p.handle_tool_call("gbrain_note", {
             "action": "stats"

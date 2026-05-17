@@ -1,7 +1,7 @@
-name: gbrain
+name: majestic-brain
 version: 0.2.0
 description: "Majestic Brain — local SQLite/FTS5 note store with deterministic entity extraction, alias linking, content-hash dedup, provenance tracking, markdown mirror, and prefetch recall. No network or model calls."
-aliases: "majestic-brain,majestic_brain"
+aliases: "gbrain"
 legacy_name: gbrain
 hooks:
   - on_memory_write

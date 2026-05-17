@@ -46,26 +46,46 @@ None — stdlib only. SQLite ships with Python; FTS5 is included in most builds.
 Clone directly into the Hermes plugins directory:
 
 ```bash
-git clone https://github.com/<org>/hermes-majestic-brain-plugin.git ~/.hermes/plugins/gbrain
+git clone https://github.com/<org>/hermes-majestic-brain-plugin.git ~/.hermes/plugins/majestic-brain
 ```
 
-The directory can stay `gbrain` for existing Hermes discovery/config compatibility;
-the provider and exposed tool are branded Majestic Brain.
+The directory name `majestic-brain` matches the provider name for config
+discovery. A legacy install under `~/.hermes/plugins/gbrain` also works —
+the provider accepts both names via `matches_name()`.
 
 ## Setup
 
 ```bash
-hermes memory setup    # select the plugin directory name; existing installs usually remain "gbrain"
+hermes memory setup    # select "majestic-brain" from the provider list
 ```
 
-Or manually for the compatibility install shown above:
+Or manually:
+
+```bash
+hermes config set memory.provider majestic-brain
+```
+
+For legacy installs under the `gbrain` directory name:
 
 ```bash
 hermes config set memory.provider gbrain
 ```
 
-If you install the plugin under `~/.hermes/plugins/majestic-brain`, set
-`memory.provider` to `majestic-brain` instead.
+## Package Structure
+
+The canonical implementation lives in the `majestic_brain` package:
+
+- `majestic_brain/` — primary implementation (provider, store, extractor)
+- `gbrain/` — thin compatibility shim, re-exports from `majestic_brain`
+
+Both import paths work:
+
+```python
+from majestic_brain import MajesticBrainProvider   # canonical
+from gbrain import GBrainProvider                    # legacy alias
+```
+
+`GBrainProvider is MajesticBrainProvider` — they are the same class.
 
 ## Tools
 
@@ -87,10 +107,12 @@ If you install the plugin under `~/.hermes/plugins/majestic-brain`, set
 
 ## Legacy Compatibility
 
-- Provider `name` property returns `"majestic-brain"` (was `"gbrain"`).
-- `legacy_name` property returns `"gbrain"`.
-- Tool `gbrain_note` continues to work alongside `majestic_brain_note`.
-- Plugin directory remains `gbrain/` for discovery compatibility.
+- Provider `name` property returns `"majestic-brain"` (primary).
+- `legacy_name` returns `"gbrain"`.
+- `matches_name()` accepts `"gbrain"`, `"majestic-brain"`, and `"majestic_brain"`.
+- `gbrain_note` tool continues to work alongside `majestic_brain_note`.
+- DB path remains `<hermes_home>/gbrain/gbrain.db` (not renamed, preserving existing data).
+- `gbrain/` package is a thin re-export shim from `majestic_brain/`.
 
 ## Development
 
