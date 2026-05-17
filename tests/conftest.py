@@ -1,6 +1,6 @@
 """Shared test configuration for the Majestic Brain plugin test suite.
 
-Adds repo root to sys.path so ``majestic_brain`` and ``gbrain`` imports work
+Adds repo root to sys.path so ``majestic_brain`` imports work
 without installation. Also adds the Hermes agent directory to sys.path when
 available so provider tests (requiring ``agent.memory_provider`` and
 ``tools.registry``) can run on developer machines.

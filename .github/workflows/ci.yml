@@ -30,4 +30,4 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -q --tb=short -k "not (MajesticBrainProvider or GBrainProvider)"
+          pytest tests/ -q --tb=short -k "not MajesticBrainProvider"

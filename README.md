@@ -3,8 +3,7 @@
 Local-first SQLite/FTS5 note store with deterministic entity extraction for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Inspired by [garrytan/gbrain](https://github.com/garrytan/gbrain) and
-[OpenHuman](https://openhuman.ai)-style memory primitives, adapted to
+Inspired by [OpenHuman](https://openhuman.ai)-style memory primitives, adapted to
 the Hermes `MemoryProvider` interface with **no network calls, no model calls,
 and no external dependencies**.
 
@@ -50,8 +49,7 @@ git clone https://github.com/<org>/hermes-majestic-brain-plugin.git ~/.hermes/pl
 ```
 
 The directory name `majestic-brain` matches the provider name for config
-discovery. A legacy install under `~/.hermes/plugins/gbrain` also works —
-the provider accepts both names via `matches_name()`.
+discovery.
 
 ## Setup
 
@@ -65,32 +63,19 @@ Or manually:
 hermes config set memory.provider majestic-brain
 ```
 
-For legacy installs under the `gbrain` directory name:
-
-```bash
-hermes config set memory.provider gbrain
-```
-
 ## Package Structure
 
 The canonical implementation lives in the `majestic_brain` package:
 
 - `majestic_brain/` — primary implementation (provider, store, extractor)
-- `gbrain/` — thin compatibility shim, re-exports from `majestic_brain`
-
-Both import paths work:
 
 ```python
-from majestic_brain import MajesticBrainProvider   # canonical
-from gbrain import GBrainProvider                    # legacy alias
+from majestic_brain import MajesticBrainProvider   # canonical import
 ```
-
-`GBrainProvider is MajesticBrainProvider` — they are the same class.
 
 ## Tools
 
-**majestic_brain_note** — primary tool with four actions (legacy name
-`gbrain_note` also accepted for backward compatibility):
+**majestic_brain_note** — primary tool with four actions:
 
 - **`add`** — Store a note. Returns `{note_id, entities, aliases, content_hash, note_kind, source_type, duplicate}`.
 - **`search`** — FTS5 search. Returns `{results, count}`.
@@ -105,14 +90,16 @@ from gbrain import GBrainProvider                    # legacy alias
 - `source_ref` (optional): Source reference string.
 - `metadata` (optional): Arbitrary JSON-serializable metadata.
 
-## Legacy Compatibility
+## Migration
 
-- Provider `name` property returns `"majestic-brain"` (primary).
-- `legacy_name` returns `"gbrain"`.
-- `matches_name()` accepts `"gbrain"`, `"majestic-brain"`, and `"majestic_brain"`.
-- `gbrain_note` tool continues to work alongside `majestic_brain_note`.
-- DB path remains `<hermes_home>/gbrain/gbrain.db` (not renamed, preserving existing data).
-- `gbrain/` package is a thin re-export shim from `majestic_brain/`.
+If upgrading from a legacy installation, run:
+
+```bash
+python scripts/migrate_legacy_db.py
+```
+
+This copies the existing database and markdown mirror to the new location
+(`<hermes_home>/majestic-brain/`) so the old directory can be safely deleted.
 
 ## Development
 

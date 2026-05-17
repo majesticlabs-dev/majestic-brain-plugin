@@ -4,7 +4,7 @@ Stores notes with extracted entities and supports full-text search with
 an automatic FTS5 fallback to LIKE when FTS5 is unavailable.
 
 Thread-safe via an RLock. Profile-scoped: each store lives at
-``<hermes_home>/gbrain/gbrain.db``.
+``<hermes_home>/majestic-brain/majestic_brain.db``.
 
 OpenHuman-style memory primitives: content_hash deduplication,
 provenance fields (note_kind, source_type, source_ref, metadata_json),
@@ -620,7 +620,3 @@ class MajesticBrainStore:
             self._conn.close()
         except Exception:
             pass
-
-
-# Legacy alias — code importing GBrainStore from this module keeps working.
-GBrainStore = MajesticBrainStore
