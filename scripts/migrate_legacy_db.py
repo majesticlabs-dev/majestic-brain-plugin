@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Simple one-time migration from a legacy GBrain DB.
+"""Simple one-time migration from a legacy gbrain DB.
 
-Usage:
+Migrates the old ``<hermes_home>/gbrain/gbrain.db`` (and optional markdown
+mirror) to the new canonical location::
+
+    <hermes_home>/majestic-brain/majestic_brain.db
+
+Usage (defaults to the standard legacy path)::
+
+    python scripts/migrate_legacy_db.py
+
+Override source if your legacy DB lived elsewhere::
+
     python scripts/migrate_legacy_db.py --source-db /path/to/old.db
 
-Optionally copy an existing markdown mirror too:
-    python scripts/migrate_legacy_db.py --source-db /path/to/old.db --source-markdown /path/to/markdown
+Optionally copy an existing markdown mirror too::
 
-The script copies the supplied database and optional markdown mirror to:
-    <hermes_home>/majestic-brain/majestic_brain.db
+    python scripts/migrate_legacy_db.py --source-markdown /path/to/markdown
 """
 
 from __future__ import annotations
@@ -19,14 +27,32 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
+# Legacy defaults — the old gbrain plugin stored its DB here.
+_LEGACY_DB_DIR = "gbrain"
+_LEGACY_DB_NAME = "gbrain.db"
+
+# New canonical paths.
+_NEW_DIR_NAME = "majestic-brain"
+_NEW_DB_NAME = "majestic_brain.db"
+
+
+def _default_legacy_db() -> Path:
+    """Return the default legacy DB path: <hermes_home>/gbrain/gbrain.db."""
+    return Path(get_hermes_home()) / _LEGACY_DB_DIR / _LEGACY_DB_NAME
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Migrate a legacy GBrain database.")
+    parser = argparse.ArgumentParser(
+        description="Migrate a legacy gbrain database to majestic-brain.",
+    )
     parser.add_argument(
         "--source-db",
-        required=True,
         type=Path,
-        help="Path to the existing legacy SQLite database file.",
+        default=None,
+        help=(
+            "Path to the existing legacy SQLite database file. "
+            "Defaults to <hermes_home>/gbrain/gbrain.db."
+        ),
     )
     parser.add_argument(
         "--source-markdown",
@@ -44,15 +70,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    source_db = args.source_db.expanduser().resolve()
+
+    source_db = args.source_db
+    if source_db is None:
+        source_db = _default_legacy_db()
+        print(f"No --source-db provided; using legacy default: {source_db}")
+    source_db = source_db.expanduser().resolve()
+
     if not source_db.exists():
         raise SystemExit(f"Source DB not found: {source_db}")
 
     hermes_home = Path(get_hermes_home())
-    new_dir = hermes_home / "majestic-brain"
+    new_dir = hermes_home / _NEW_DIR_NAME
     new_dir.mkdir(parents=True, exist_ok=True)
 
-    new_db = new_dir / "majestic_brain.db"
+    new_db = new_dir / _NEW_DB_NAME
     if new_db.exists() and not args.force:
         raise SystemExit(
             f"Destination DB already exists at {new_db}. Re-run with --force to overwrite."

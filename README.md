@@ -98,8 +98,11 @@ If upgrading from a legacy installation, run:
 python scripts/migrate_legacy_db.py
 ```
 
-This copies the existing database and markdown mirror to the new location
-(`<hermes_home>/majestic-brain/`) so the old directory can be safely deleted.
+This copies the legacy database (defaults to the old standard location) to
+the new canonical path (`<hermes_home>/majestic-brain/majestic_brain.db`).
+Run with `--help` for options including custom source paths and markdown
+mirror migration. After a successful copy the old data directory can be
+safely deleted.
 
 ## Development
 
